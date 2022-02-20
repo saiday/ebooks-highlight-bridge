@@ -9,6 +9,7 @@ import Photos
 import UIKit
 import Vision
 
+@available(iOS 13.0, *)
 class ViewController: UIViewController, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
     
     // Switches to toggle types of Vision requests ON/OFF
@@ -293,137 +294,81 @@ class ViewController: UIViewController, UIImagePickerControllerDelegate, UINavig
     
     /// - Tag: CreateRequests
     fileprivate func createVisionRequests() -> [VNRequest] {
-        
         // Create an array to collect all desired requests.
         var requests: [VNRequest] = []
         
-        // Create & include a request if and only if switch is ON.
-        if self.rectSwitch.isOn {
-            requests.append(self.rectangleDetectionRequest)
-        }
-        if self.faceSwitch.isOn {
-            // Break rectangle & face landmark detection into 2 stages to have more fluid feedback in UI.
-            requests.append(self.faceDetectionRequest)
-            requests.append(self.faceLandmarkRequest)
-        }
         if self.textSwitch.isOn {
-            requests.append(self.textDetectionRequest)
-        }
-        if self.barcodeSwitch.isOn {
-            requests.append(self.barcodeDetectionRequest)
+            requests.append(self.recognizeTextRequest)
         }
         
-        // Return grouped requests as a single array.
         return requests
     }
     
-    fileprivate func handleDetectedRectangles(request: VNRequest?, error: Error?) {
-        if let nsError = error as NSError? {
-            self.presentAlert("Rectangle Detection Error", error: nsError)
-            return
-        }
-        // Since handlers are executing on a background thread, explicitly send draw calls to the main thread.
-        DispatchQueue.main.async {
-            guard let drawLayer = self.pathLayer,
-                let results = request?.results as? [VNRectangleObservation] else {
-                    return
-            }
-            self.draw(rectangles: results, onImageWithBounds: drawLayer.bounds)
-            drawLayer.setNeedsDisplay()
-        }
-    }
-    
-    fileprivate func handleDetectedFaces(request: VNRequest?, error: Error?) {
-        if let nsError = error as NSError? {
-            self.presentAlert("Face Detection Error", error: nsError)
-            return
-        }
-        // Perform drawing on the main thread.
-        DispatchQueue.main.async {
-            guard let drawLayer = self.pathLayer,
-                let results = request?.results as? [VNFaceObservation] else {
-                    return
-            }
-            self.draw(faces: results, onImageWithBounds: drawLayer.bounds)
-            drawLayer.setNeedsDisplay()
-        }
-    }
-    
-    fileprivate func handleDetectedFaceLandmarks(request: VNRequest?, error: Error?) {
-        if let nsError = error as NSError? {
-            self.presentAlert("Face Landmark Detection Error", error: nsError)
-            return
-        }
-        // Perform drawing on the main thread.
-        DispatchQueue.main.async {
-            guard let drawLayer = self.pathLayer,
-                let results = request?.results as? [VNFaceObservation] else {
-                    return
-            }
-            self.drawFeatures(onFaces: results, onImageWithBounds: drawLayer.bounds)
-            drawLayer.setNeedsDisplay()
-        }
-    }
-    
-    fileprivate func handleDetectedText(request: VNRequest?, error: Error?) {
+    fileprivate func handleDetectedText(request: VNRequest, error: Error?) {
         if let nsError = error as NSError? {
             self.presentAlert("Text Detection Error", error: nsError)
             return
         }
+        
+        guard let observations =
+              request.results as? [VNRecognizedTextObservation] else {
+          return
+        }
+        let recognizedStrings = observations.compactMap { observation in
+          // Return the string of the top VNRecognizedText instance.
+          return observation.topCandidates(1).first?.string
+        }
+
+        let boundingRects: [CGRect] = observations.compactMap { observation in
+            // Find the top observation.
+            guard let candidate = observation.topCandidates(1).first else { return .zero }
+            
+            // Find the bounding-box observation for the string range.
+            let stringRange = candidate.string.startIndex..<candidate.string.endIndex
+            let boxObservation = try? candidate.boundingBox(for: stringRange)
+            
+            // Get the normalized CGRect value.
+            let boundingBox = boxObservation?.boundingBox ?? .zero
+            
+            return boundingBox
+        }
+
         // Perform drawing on the main thread.
         DispatchQueue.main.async {
-            guard let drawLayer = self.pathLayer,
-                let results = request?.results as? [VNTextObservation] else {
-                    return
+            guard let drawLayer = self.pathLayer else { return }
+            let bounds = drawLayer.bounds
+            CATransaction.begin()
+            for rect in boundingRects {
+                var repositionRect = rect
+                // Reposition origin.
+                repositionRect.origin.x *= self.imageWidth
+                repositionRect.origin.x += bounds.origin.x
+                repositionRect.origin.y = (1 - repositionRect.origin.y) * self.imageHeight + bounds.origin.y
+                
+                // Rescale normalized coordinates.
+                repositionRect.size.width *= self.imageWidth
+                repositionRect.size.height *= self.imageHeight
+
+                let wordLayer = self.shapeLayer(color: .red, frame: repositionRect)
+                
+                // Add to pathLayer on top of image.
+                drawLayer.addSublayer(wordLayer)
             }
-            self.draw(text: results, onImageWithBounds: drawLayer.bounds)
-            drawLayer.setNeedsDisplay()
-        }
-    }
-    
-    fileprivate func handleDetectedBarcodes(request: VNRequest?, error: Error?) {
-        if let nsError = error as NSError? {
-            self.presentAlert("Barcode Detection Error", error: nsError)
-            return
-        }
-        // Perform drawing on the main thread.
-        DispatchQueue.main.async {
-            guard let drawLayer = self.pathLayer,
-                let results = request?.results as? [VNBarcodeObservation] else {
-                    return
-            }
-            self.draw(barcodes: results, onImageWithBounds: drawLayer.bounds)
+            CATransaction.commit()
             drawLayer.setNeedsDisplay()
         }
     }
     
     /// - Tag: ConfigureCompletionHandler
-    lazy var rectangleDetectionRequest: VNDetectRectanglesRequest = {
-        let rectDetectRequest = VNDetectRectanglesRequest(completionHandler: self.handleDetectedRectangles)
-        // Customize & configure the request to detect only certain rectangles.
-        rectDetectRequest.maximumObservations = 8 // Vision currently supports up to 16.
-        rectDetectRequest.minimumConfidence = 0.6 // Be confident.
-        rectDetectRequest.minimumAspectRatio = 0.3 // height / width
-        return rectDetectRequest
-    }()
     
-    lazy var faceDetectionRequest = VNDetectFaceRectanglesRequest(completionHandler: self.handleDetectedFaces)
-    lazy var faceLandmarkRequest = VNDetectFaceLandmarksRequest(completionHandler: self.handleDetectedFaceLandmarks)
-    
-    lazy var textDetectionRequest: VNDetectTextRectanglesRequest = {
-        let textDetectRequest = VNDetectTextRectanglesRequest(completionHandler: self.handleDetectedText)
+    // new API for iOS 13+
+    lazy var recognizeTextRequest: VNRecognizeTextRequest = {
+        let recognizeTextRequest = VNRecognizeTextRequest(completionHandler: self.handleDetectedText)
         // Tell Vision to report bounding box around each character.
-        textDetectRequest.reportCharacterBoxes = true
-        return textDetectRequest
+        recognizeTextRequest.recognitionLanguages = ["zh-Hant"]
+        return recognizeTextRequest
     }()
-    
-    lazy var barcodeDetectionRequest: VNDetectBarcodesRequest = {
-        let barcodeDetectRequest = VNDetectBarcodesRequest(completionHandler: self.handleDetectedBarcodes)
-        // Restrict detection to most common symbologies.
-        barcodeDetectRequest.symbologies = [.QR, .Aztec, .UPCE]
-        return barcodeDetectRequest
-    }()
-    
+
     // MARK: - Path-Drawing
     
     fileprivate func boundingBox(forRegionOfInterest: CGRect, withinImageBounds bounds: CGRect) -> CGRect {
@@ -468,137 +413,6 @@ class ViewController: UIViewController, UIImagePickerControllerDelegate, UINavig
         layer.transform = CATransform3DMakeScale(1, -1, 1)
         
         return layer
-    }
-    
-    // Rectangles are BLUE.
-    fileprivate func draw(rectangles: [VNRectangleObservation], onImageWithBounds bounds: CGRect) {
-        CATransaction.begin()
-        for observation in rectangles {
-            let rectBox = boundingBox(forRegionOfInterest: observation.boundingBox, withinImageBounds: bounds)
-            let rectLayer = shapeLayer(color: .blue, frame: rectBox)
-            
-            // Add to pathLayer on top of image.
-            pathLayer?.addSublayer(rectLayer)
-        }
-        CATransaction.commit()
-    }
-    
-    // Faces are YELLOW.
-    /// - Tag: DrawBoundingBox
-    fileprivate func draw(faces: [VNFaceObservation], onImageWithBounds bounds: CGRect) {
-        CATransaction.begin()
-        for observation in faces {
-            let faceBox = boundingBox(forRegionOfInterest: observation.boundingBox, withinImageBounds: bounds)
-            let faceLayer = shapeLayer(color: .yellow, frame: faceBox)
-            
-            // Add to pathLayer on top of image.
-            pathLayer?.addSublayer(faceLayer)
-        }
-        CATransaction.commit()
-    }
-    
-    // Facial landmarks are GREEN.
-    fileprivate func drawFeatures(onFaces faces: [VNFaceObservation], onImageWithBounds bounds: CGRect) {
-        CATransaction.begin()
-        for faceObservation in faces {
-            let faceBounds = boundingBox(forRegionOfInterest: faceObservation.boundingBox, withinImageBounds: bounds)
-            guard let landmarks = faceObservation.landmarks else {
-                continue
-            }
-            
-            // Iterate through landmarks detected on the current face.
-            let landmarkLayer = CAShapeLayer()
-            let landmarkPath = CGMutablePath()
-            let affineTransform = CGAffineTransform(scaleX: faceBounds.size.width, y: faceBounds.size.height)
-            
-            // Treat eyebrows and lines as open-ended regions when drawing paths.
-            let openLandmarkRegions: [VNFaceLandmarkRegion2D?] = [
-                landmarks.leftEyebrow,
-                landmarks.rightEyebrow,
-                landmarks.faceContour,
-                landmarks.noseCrest,
-                landmarks.medianLine
-            ]
-            
-            // Draw eyes, lips, and nose as closed regions.
-            let closedLandmarkRegions = [
-                landmarks.leftEye,
-                landmarks.rightEye,
-                landmarks.outerLips,
-                landmarks.innerLips,
-                landmarks.nose
-                ].compactMap { $0 } // Filter out missing regions.
-            
-            // Draw paths for the open regions.
-            for openLandmarkRegion in openLandmarkRegions where openLandmarkRegion != nil {
-                landmarkPath.addPoints(in: openLandmarkRegion!,
-                                       applying: affineTransform,
-                                       closingWhenComplete: false)
-            }
-            
-            // Draw paths for the closed regions.
-            for closedLandmarkRegion in closedLandmarkRegions {
-                landmarkPath.addPoints(in: closedLandmarkRegion,
-                                       applying: affineTransform,
-                                       closingWhenComplete: true)
-            }
-            
-            // Format the path's appearance: color, thickness, shadow.
-            landmarkLayer.path = landmarkPath
-            landmarkLayer.lineWidth = 2
-            landmarkLayer.strokeColor = UIColor.green.cgColor
-            landmarkLayer.fillColor = nil
-            landmarkLayer.shadowOpacity = 0.75
-            landmarkLayer.shadowRadius = 4
-            
-            // Locate the path in the parent coordinate system.
-            landmarkLayer.anchorPoint = .zero
-            landmarkLayer.frame = faceBounds
-            landmarkLayer.transform = CATransform3DMakeScale(1, -1, 1)
-            
-            // Add to pathLayer on top of image.
-            pathLayer?.addSublayer(landmarkLayer)
-        }
-        CATransaction.commit()
-    }
-    
-    // Lines of text are RED.  Individual characters are PURPLE.
-    fileprivate func draw(text: [VNTextObservation], onImageWithBounds bounds: CGRect) {
-        CATransaction.begin()
-        for wordObservation in text {
-            let wordBox = boundingBox(forRegionOfInterest: wordObservation.boundingBox, withinImageBounds: bounds)
-            let wordLayer = shapeLayer(color: .red, frame: wordBox)
-            
-            // Add to pathLayer on top of image.
-            pathLayer?.addSublayer(wordLayer)
-            
-            // Iterate through each character within the word and draw its box.
-            guard let charBoxes = wordObservation.characterBoxes else {
-                continue
-            }
-            for charObservation in charBoxes {
-                let charBox = boundingBox(forRegionOfInterest: charObservation.boundingBox, withinImageBounds: bounds)
-                let charLayer = shapeLayer(color: .purple, frame: charBox)
-                charLayer.borderWidth = 1
-                
-                // Add to pathLayer on top of image.
-                pathLayer?.addSublayer(charLayer)
-            }
-        }
-        CATransaction.commit()
-    }
-    
-    // Barcodes are ORANGE.
-    fileprivate func draw(barcodes: [VNBarcodeObservation], onImageWithBounds bounds: CGRect) {
-        CATransaction.begin()
-        for observation in barcodes {
-            let barcodeBox = boundingBox(forRegionOfInterest: observation.boundingBox, withinImageBounds: bounds)
-            let barcodeLayer = shapeLayer(color: .orange, frame: barcodeBox)
-            
-            // Add to pathLayer on top of image.
-            pathLayer?.addSublayer(barcodeLayer)
-        }
-        CATransaction.commit()
     }
 }
 
